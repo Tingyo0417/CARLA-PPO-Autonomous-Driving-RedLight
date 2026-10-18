@@ -1,0 +1,28 @@
+# Python / local environments
+__pycache__/
+*.py[cod]
+venv/
+.venv/
+.idea/
+.vscode/
+.env
+.env.*
+!.env.example
+# Local archive and generated videos
+_整理備份_*/
+*.avi
+*.mp4
+*.out
+*.log
+# Generated intermediate checkpoints (selected models remain uploadable)
+tensorboard/**/model_*_steps.zip
+!tensorboard/PPO_1776260506_id1/model_5000000_steps.zip
+!tensorboard/PPO_1785232694_id16/model_5000000_steps.zip
+vae/log_dir/**/checkpoint.tar
+vae/log_dir/**/samples/
+.DS_Store
+
+# Demo video kept for the README (converted to MP4)
+!docs/videos/*.mp4
+# Full report with abstract; docs/ holds the published copy
+附件一_專題報告.pdf
