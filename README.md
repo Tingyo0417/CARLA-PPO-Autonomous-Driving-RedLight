@@ -1,4 +1,172 @@
-# 強化學習在自駕車系統之應用：PPO 決策模組
+# Reinforcement Learning for Autonomous Driving: PPO Lane Keeping and Red-Light Stopping
+
+**English** | [中文](#中文)
+
+Undergraduate capstone project, Department of Artificial Intelligence, Tamkang University (academic year 2025–26, advisor: Prof. Yin-Tien Wang). This repository contains the project's **reinforcement learning decision module** (author: Ting-Yo Chen). A PPO agent from Stable-Baselines3 is trained in the CARLA simulator to keep its lane, control its speed, and stop at red lights.
+
+Full project report (Chinese): [docs/專題報告_強化學習在自駕車系統之應用.pdf](docs/專題報告_強化學習在自駕車系統之應用.pdf). Chapter 3 (sections 3.1–3.6) covers the PPO work.
+
+<p align="center">
+  <img width="80%" src="docs/videos/ppo_v10_eval_preview.gif">
+  <br>
+  <em>v10 evaluation clip: the car waits at an intersection based on CARLA's traffic-light state. Full video: <a href="docs/videos/ppo_v10_eval_demo.mp4">ppo_v10_eval_demo.mp4</a></em>
+</p>
+
+## My contributions
+
+Built on top of [Maté's CARLA-SB3 training environment](https://github.com/alberto-mate/CARLA-SB3-RL-Training-Environment):
+
+- **Multiplicative composite reward**: speed × lane centering × heading angle × lateral-offset stability. The spatial factors have a floor of 0.5, so one bad factor can't zero out the whole reward and stall learning.
+- **Steering smoothing**: exponential smoothing on the action output (`action_smoothing`) to reduce steering oscillation.
+- **Brake action with throttle/brake exclusion**: the action space goes from `[steer, throttle]` to `[steer, throttle, brake]`. Only the larger of throttle and brake is applied.
+- **Red-light braking**: the agent reads the traffic-light state from CARLA. During training, each light the car approaches is forced to red with 30% probability for 4–8 s. The project adds red-light-running detection and a red-light-specific speed reward.
+
+## Architecture
+
+<p align="center">
+  <img width="80%" src="docs/images/adc_drl_flow.png">
+  <br><em>ADC-DRL flow: VAE image features are combined with other state attributes into a 97-dim state, and PPO outputs control actions</em>
+</p>
+
+The state $s_t$ at each step has 97 dimensions:
+
+| Source | Dim | Content |
+| --- | --- | --- |
+| VAE visual features | 64 | Latent vector of the front camera image from the VAE encoder |
+| Vehicle state | 3 | steer, throttle, speed |
+| Navigation | 30 | Upcoming waypoints |
+
+The actor and critic share a feature extractor. Each then has its own two fully connected layers (500 → 300, ReLU). The actor outputs the mean $\mu$ of a Gaussian, with a trainable standard deviation $\sigma$, and samples continuous control actions from it. The critic outputs the state value $V(s_t)$.
+
+<p align="center">
+  <img width="70%" src="docs/images/actor_critic.png">
+  <br><em>Actor-critic networks</em>
+</p>
+
+### PPO update loop
+
+<p align="center">
+  <img width="85%" src="docs/images/ppo_update.png">
+</p>
+
+1. Interact with CARLA and store $(s_t, a_t, r_{t+1}, s_{t+1})$ in the rollout buffer. Continue until a collision, a violation, or the step limit.
+2. Compute advantages with GAE: $\delta_t = r_{t+1} + \gamma V(s_{t+1}) - V(s_t)$, $\hat{A}_t = \sum_l (\gamma\lambda)^l \delta_{t+l}$.
+3. Minimize the total loss $L = -L^{CLIP} + c_1 L^{VF} - c_2 H$ with clip $\epsilon = 0.2$ and $c_1 = 0.5$.
+4. Backpropagate with Adam and gradient clipping. PPO is on-policy, so the buffer is cleared after each update.
+
+## Reward design
+
+The base reward is the product of four factors, in $[0, 1]$:
+
+$$\text{Reward} = \text{Speed} \times \text{Centering} \times \text{Angle} \times \text{DistanceStd}$$
+
+| Factor | Definition |
+| --- | --- |
+| Speed | $V \le V_{min}$: $V / V_{min}$; $V_{min} < V \le V_{target}$: 1.0; $V > V_{target}$: decreases linearly toward $V_{max}$ |
+| Centering | $\max(1 - D / D_{max}, 0)$, $D_{max} = 3.0$ m |
+| Angle | $\max(1 - \lvert\theta / \theta_{max}\rvert, 0)$, $\theta_{max} = 90^\circ$ |
+| DistanceStd | Std. dev. $\sigma$ of lane offset over the last 30 steps: $\max(1 - \sigma / 0.4, 0)$ |
+
+**Red light**: the target speed depends on the distance $D_t$ to the light: $V_{stop} = \max(0, D_t - 5)$. If $V \le V_{stop} + 2$, the speed reward is 1.0. Otherwise it is $\max(0, 1 - (V - V_{stop}) / 10)$. The agent also gets an idling penalty for standing still too long when the light isn't red.
+
+**Episode termination**: collision, lane deviation beyond $D_{max}$, speeding, or running a red light (crossing the stop line above 2 km/h while the light is red).
+
+Relevant code:
+
+- Reward functions: [`carla_env/rewards.py`](carla_env/rewards.py)
+- Red-light detection, forced red lights, throttle/brake exclusion: [`carla_env/envs/carla_route_env.py`](carla_env/envs/carla_route_env.py)
+- State encoding (including `red_light`): [`carla_env/state_commons.py`](carla_env/state_commons.py)
+- Experiment settings: `_CONFIG_16` in [`config.py`](config.py)
+
+## Training settings (config 16)
+
+| Parameter | Value |
+| --- | --- |
+| learning rate | 3e-5 → 1e-6 schedule |
+| gamma / gae_lambda | 0.98 / 0.95 |
+| clip_range / ent_coef | 0.2 / 0.005 |
+| n_steps / batch_size / n_epochs | 1024 / 128 / 5 |
+| net_arch | pi: [500, 300], vf: [500, 300] |
+| VAE | `vae_64` |
+| action_smoothing | 0.75 |
+| Timesteps | 5,000,000 |
+
+## Results
+
+<p align="center">
+  <img width="70%" src="docs/images/training_reward.png">
+  <br><em>Total reward per episode (moving average), red-light training run</em>
+</p>
+
+<p align="center">
+  <img width="80%" src="docs/images/red_light_stop.jpg">
+  <br><em>Stopping at a red light: speed 0 km/h, throttle and steering at zero, brake applied</em>
+</p>
+
+The repo includes two 5M-step runs. Each one has `config.json`, `progress.csv`, TensorBoard events, the model, and evaluation CSVs and plots:
+
+| Folder | Description | Evaluation |
+| --- | --- | --- |
+| [`tensorboard/PPO_1776260506_id1`](tensorboard/PPO_1776260506_id1) | Baseline PPO (lane keeping + speed control) | 4/4 episodes succeeded, mean speed 18.39 km/h, mean lane offset 0.033 m |
+| [`tensorboard/PPO_1785232694_id16`](tensorboard/PPO_1785232694_id16) | PPO + brake + red-light training | With the v10 control pipeline: 8/8 succeeded in both `final_v10` and `controller_v10_acceptance_8x4500` |
+
+Notes:
+
+- The figures in section 3.5 of the report (mean speed 22.85 km/h, 681.53 m driven, mean step reward 0.8959) come from a different test run. They don't match the CSVs in this repo one-to-one.
+- The 8/8 success for id16 includes the effect of the external control pipeline, so it can't be attributed to PPO alone. The same model evaluated without the v10 pipeline (`model_5000000_steps_eval*`) failed all 20 episodes. That run is kept for comparison.
+- Red-light stopping uses the traffic-light state provided directly by CARLA. Camera-based light recognition isn't implemented yet. Performance at other intersections and under other traffic conditions hasn't been tested.
+
+## Installation and usage
+
+The report's environment: CARLA 0.9.16, Stable-Baselines3 2.9.0, CUDA 13.0. Hardware: Ryzen 9 7900X3D, 2 × RTX 4090, 128 GB RAM. `requirements.txt` keeps the original framework's pinned versions. Adjust the `carla` package to match your CARLA version.
+
+```bash
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+export CARLA_ROOT=<path to CARLA>
+```
+
+Train, inspect, and evaluate:
+
+```bash
+python train.py --config 16 --total_timesteps 5000000
+tensorboard --logdir tensorboard
+python eval.py --config 16 --model tensorboard/PPO_1785232694_id16/model_5000000_steps.zip
+```
+
+Evaluation routes are set in `eval_routes` in `carla_env/envs/carla_route_env.py`. For VAE training and data collection, see `vae/train_vae.py` and `carla_env/envs/collect_data_*.py`.
+
+## Team
+
+| Member | Module |
+| --- | --- |
+| Ting-Yo Chen | Reinforcement learning decision module (PPO, reward design, braking and red-light training) ← this repo |
+| Cheng-Lun Chuang | VAE visual compression, LaneNet lane segmentation |
+| Tzu-Yang Hsu | Vision-based autonomous emergency braking (AEB), system integration |
+
+## Acknowledgements
+
+The training environment is built on Alberto Maté's [CARLA-SB3-RL-Training-Environment](https://github.com/alberto-mate/CARLA-SB3-RL-Training-Environment), and the architecture follows Razak's ADC-DRL. If you use the original framework, please cite:
+
+```
+@software{Mate_CARLA-SB3-RL-Training-Environment_out-of-the-box_training_2023,
+  author = {Mate, Alberto},
+  month = jun,
+  title = {{CARLA-SB3-RL-Training-Environment: out-of-the-box training and evaluation environment for DRL in CARLA simulator}},
+  url = {https://github.com/alberto-mate/CARLA-SB3-RL-Training-Environment},
+  version = {1.0.0},
+  year = {2023}
+}
+```
+
+---
+
+<a id="中文"></a>
+
+# 強化學習在自駕車系統之應用：PPO 車道保持與紅燈煞停
+
+[English](#reinforcement-learning-for-autonomous-driving-ppo-lane-keeping-and-red-light-stopping) | **中文**
 
 淡江大學人工智慧學系 114 學年度專題（指導老師：王銀添 教授）。本 repo 是專題中的 **強化學習決策模組**（負責人：陳廷祐），以 CARLA 模擬器搭配 Stable-Baselines3 的 PPO，訓練能車道置中、控制車速並在紅燈前停車的自駕車代理人。
 
@@ -17,7 +185,7 @@
 - **複合型乘法獎勵**：速度 × 車道置中 × 車身角度 × 歷史偏移穩定度，空間因子下限縮放至 0.5，避免單一因素讓總分歸零、模型停滯不前。
 - **方向盤平滑**：對動作輸出做指數平滑（`action_smoothing`），減少轉向震盪。
 - **煞車動作與油煞互斥**：動作空間由 `[steer, throttle]` 擴充為 `[steer, throttle, brake]`，並且油門與煞車只保留較大者。
-- **紅燈情境訓練**：讀取 CARLA 號誌狀態，訓練時以 30% 機率把遇到的號誌強制設為紅燈（持續 4–8 秒），並加入闖紅燈判定與紅燈專用的速度獎勵。
+- **紅燈煞車**：讀取 CARLA 號誌狀態，訓練時以 30% 機率把遇到的號誌強制設為紅燈（持續 4–8 秒），並加入闖紅燈判定與紅燈專用的速度獎勵。
 
 ## 系統架構
 
@@ -143,17 +311,6 @@ python eval.py --config 16 --model tensorboard/PPO_1785232694_id16/model_5000000
 | 莊正綸 | VAE 視覺資訊壓縮、LaneNet 車道分割 |
 | 徐子洋 | 純視覺 AEB 自動緊急煞車系統、雙系統整合 |
 
-## 致謝與引用
+## 致謝
 
-本專案的訓練環境建立在 Alberto Maté 的 [CARLA-SB3-RL-Training-Environment](https://github.com/alberto-mate/CARLA-SB3-RL-Training-Environment) 之上，架構參考 Razak 的 ADC-DRL。若使用原框架，請引用：
-
-```
-@software{Mate_CARLA-SB3-RL-Training-Environment_out-of-the-box_training_2023,
-  author = {Mate, Alberto},
-  month = jun,
-  title = {{CARLA-SB3-RL-Training-Environment: out-of-the-box training and evaluation environment for DRL in CARLA simulator}},
-  url = {https://github.com/alberto-mate/CARLA-SB3-RL-Training-Environment},
-  version = {1.0.0},
-  year = {2023}
-}
-```
+本專案的訓練環境建立在 Alberto Maté 的 [CARLA-SB3-RL-Training-Environment](https://github.com/alberto-mate/CARLA-SB3-RL-Training-Environment) 之上，架構參考 Razak 的 ADC-DRL。引用格式請見英文版的 [Acknowledgements](#acknowledgements)。
